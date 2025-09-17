@@ -1,28 +1,56 @@
-# Simple Railway MediaMTX Config
+# mediamtx.yml - Enhanced Railway WebRTC Config
 logLevel: info
 logDestinations: [stdout]
 
+# API
 api: yes
 apiAddress: :9997
 apiAllowOrigin: '*'
 
+# HLS - Main viewer method for Railway
 hls: yes
 hlsAddress: :8888
 hlsAllowOrigin: '*'
 hlsAlwaysRemux: yes
+hlsVariant: mpegts
 hlsSegmentCount: 3
 hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
 
+# ✅ ENHANCED WebRTC for Railway
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigin: '*'
+
+# ✅ CRITICAL: Railway-specific WebRTC settings
+webrtcLocalUDPAddress: ''  # Disable UDP in Railway
+webrtcLocalTCPAddress: :8190  # Enable TCP fallback
 webrtcIPsFromInterfaces: no
-webrtcAdditionalHosts: ["0.0.0.0"]
+webrtcAdditionalHosts: 
+  - "0.0.0.0"
+
+# ✅ ENHANCED: More STUN servers + longer timeouts
 webrtcICEServers2:
   - url: stun:stun.l.google.com:19302
+  - url: stun:stun1.l.google.com:19302
+  - url: stun:stun2.l.google.com:19302
+  - url: stun:global.stun.twilio.com:3478
+  - url: stun:stun.services.mozilla.com:3478
 
+# ✅ LONGER timeouts for Railway
+webrtcHandshakeTimeout: 30s  # Increased from 10s
+webrtcTrackGatherTimeout: 10s  # Increased from 2s
+webrtcSTUNGatherTimeout: 15s   # Increased from 5s
+
+# RTSP - Backup protocol
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+# Path settings
 pathDefaults:
   source: publisher
+  sourceOnDemand: no
   overridePublisher: yes
 
 paths:
