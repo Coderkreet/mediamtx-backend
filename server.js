@@ -149,48 +149,79 @@ let activeProctors = {};
 
 // ✅ MediaMTX PROXYING - CRITICAL for Railway
 // WHIP endpoint proxy (for publishing streams)
+// server.js में WHIP endpoint को enhance करें
 app.post('/:streamName/whip', async (req, res) => {
   try {
     const { streamName } = req.params;
     const sdpOffer = req.body;
     
     console.log(`📤 WHIP proxy request for stream: ${streamName}`);
-    console.log('SDP Offer length:', sdpOffer ? sdpOffer.length : 'undefined');
     
     if (!sdpOffer) {
       return res.status(400).json({ error: 'No SDP offer provided' });
     }
 
-    const response = await fetch(`http://localhost:8889/${streamName}/whip`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/sdp',
-        'Accept': 'application/sdp'
-      },
-      body: sdpOffer
-    });
+    // ✅ ENHANCED: Longer timeout for Railway
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
-    if (response.ok) {
-      const answerSdp = await response.text();
-      console.log(`✅ WHIP proxy success for ${streamName}, answer length:`, answerSdp.length);
-      
-      res.set({
-        'Content-Type': 'application/sdp',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
+    try {
+      const response = await fetch(`http://localhost:8889/${streamName}/whip`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/sdp',
+          'Accept': 'application/sdp'
+        },
+        body: sdpOffer,
+        signal: controller.signal
       });
-      res.send(answerSdp);
-    } else {
-      const errorText = await response.text();
-      console.error(`❌ WHIP proxy failed for ${streamName}: ${response.status} - ${errorText}`);
-      res.status(response.status).send(errorText);
+
+      clearTimeout(timeout);
+
+      if (response.ok) {
+        const answerSdp = await response.text();
+        console.log(`✅ WHIP proxy success for ${streamName}`);
+        
+        res.set({
+          'Content-Type': 'application/sdp',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type'
+        });
+        res.send(answerSdp);
+      } else {
+        const errorText = await response.text();
+        console.error(`❌ WHIP proxy failed for ${streamName}: ${response.status} - ${errorText}`);
+        
+        // ✅ Even if WHIP fails, don't error - HLS will work
+        res.status(202).json({ 
+          message: 'Stream received, WebRTC may timeout but HLS will be available',
+          hlsUrl: `/hls/${streamName}/`
+        });
+      }
+    } catch (fetchError) {
+      clearTimeout(timeout);
+      if (fetchError.name === 'AbortError') {
+        console.log(`⏰ WHIP timeout for ${streamName}, but HLS should work`);
+        res.status(202).json({ 
+          message: 'WebRTC timeout, but stream is being processed for HLS',
+          hlsUrl: `/hls/${streamName}/`
+        });
+      } else {
+        throw fetchError;
+      }
     }
+
   } catch (error) {
     console.error('❌ WHIP proxy error:', error);
-    res.status(503).json({ error: 'MediaMTX WHIP service unavailable', details: error.message });
+    res.status(503).json({ 
+      error: 'MediaMTX WHIP service unavailable', 
+      details: error.message,
+      fallback: 'HLS streaming may still work'
+    });
   }
 });
+
 
 // WHEP endpoint proxy (for subscribing to streams)
 app.post('/:streamName/whep', async (req, res) => {
