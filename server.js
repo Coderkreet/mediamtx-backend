@@ -12,7 +12,7 @@ const server = http.createServer(app);
 
 // Railway environment variables
 const PORT = process.env.PORT || 3000; // Railway automatically sets PORT
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://your-vercel-app.vercel.app';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://mediamtx-frontend.vercel.app';
 
 // Middleware
 app.use(helmet());
