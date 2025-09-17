@@ -1,10 +1,10 @@
-// server.js - Complete Railway Ready Version
+// server.js - Complete Railway Ready Version with MediaMTX Proxying
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
-const { spawn, execSync, exec } = require('child_process'); // ✅ Add execSync, exec
+const { spawn, execSync, exec } = require('child_process');
 require('dotenv').config();
 
 const app = express();
@@ -13,7 +13,7 @@ const server = http.createServer(app);
 // Railway environment variables
 const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://mediamtx-frontend.vercel.app';
-const MEDIAMTX_HTTP_URL = process.env.MEDIAMTX_HTTP_URL || 'http://localhost:8889'; // ✅ ADD THIS
+const MEDIAMTX_HTTP_URL = process.env.MEDIAMTX_HTTP_URL || 'http://localhost:8889';
 
 // Middleware
 app.use(helmet());
@@ -21,6 +21,10 @@ app.use(cors({
   origin: [FRONTEND_URL, 'http://localhost:3000'],
   credentials: true
 }));
+
+// ✅ IMPORTANT: Raw body parser for WHIP/WHEP requests
+app.use('/*/whip', express.text({ type: 'application/sdp', limit: '10mb' }));
+app.use('/*/whep', express.text({ type: 'application/sdp', limit: '10mb' }));
 app.use(express.json());
 
 // Socket.IO setup
@@ -30,26 +34,23 @@ const io = socketIo(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ['websocket', 'polling'] // ✅ ADD Railway compatibility
+  transports: ['websocket', 'polling']
 });
 
 // MediaMTX Process Management
 let mediamtxProcess = null;
 
-// ✅ ENHANCED startMediaMTX with better error handling
 const startMediaMTX = () => {
   try {
     console.log('🎥 Starting MediaMTX on Railway...');
     
     const mediamtxBinary = process.platform === 'win32' ? './mediamtx.exe' : './mediamtx';
     
-    // ✅ PERMISSION FIX
     if (process.platform !== 'win32') {
       try {
         execSync('chmod +x ./mediamtx', { stdio: 'pipe' });
         console.log('✅ MediaMTX binary permissions fixed');
         
-        // ✅ Verify file exists and is executable
         const fs = require('fs');
         if (fs.existsSync('./mediamtx')) {
           console.log('✅ MediaMTX binary file exists');
@@ -83,7 +84,6 @@ const startMediaMTX = () => {
       }
     });
 
-    // ✅ ENHANCED ERROR HANDLING
     mediamtxProcess.on('error', (error) => {
       console.error('❌ MediaMTX spawn error:', error);
       if (error.code === 'EACCES') {
@@ -101,12 +101,10 @@ const startMediaMTX = () => {
   }
 };
 
-// ✅ IMPROVED ALTERNATIVE METHOD
 const startMediaMTXAlternative = () => {
   try {
     console.log('🔄 Using alternative MediaMTX startup method...');
     
-    // Check if file exists first
     const fs = require('fs');
     if (!fs.existsSync('./mediamtx')) {
       console.error('❌ MediaMTX binary not found for alternative method');
@@ -120,7 +118,6 @@ const startMediaMTXAlternative = () => {
         console.log('✅ Permissions fixed with alternative method');
       }
       
-      // Start MediaMTX in background
       const mtxProcess = exec('./mediamtx mediamtx.yml', (error, stdout, stderr) => {
         if (error) {
           console.error('❌ Alternative MediaMTX start failed:', error);
@@ -130,7 +127,6 @@ const startMediaMTXAlternative = () => {
         if (stderr) console.error('MediaMTX stderr:', stderr);
       });
       
-      // Update global reference
       mediamtxProcess = mtxProcess;
       console.log('✅ MediaMTX started with exec method');
     });
@@ -143,7 +139,7 @@ const startMediaMTXAlternative = () => {
 // Start MediaMTX with delay for Railway initialization
 setTimeout(() => {
   startMediaMTX();
-}, 3000); // 3 second delay
+}, 3000);
 
 // Storage
 let rooms = {};
@@ -151,11 +147,170 @@ let socketToRoom = {};
 let activeStudents = {};
 let activeProctors = {};
 
-// Socket connection handling
+// ✅ MediaMTX PROXYING - CRITICAL for Railway
+// WHIP endpoint proxy (for publishing streams)
+app.post('/:streamName/whip', async (req, res) => {
+  try {
+    const { streamName } = req.params;
+    const sdpOffer = req.body;
+    
+    console.log(`📤 WHIP proxy request for stream: ${streamName}`);
+    console.log('SDP Offer length:', sdpOffer ? sdpOffer.length : 'undefined');
+    
+    if (!sdpOffer) {
+      return res.status(400).json({ error: 'No SDP offer provided' });
+    }
+
+    const response = await fetch(`http://localhost:8889/${streamName}/whip`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sdp',
+        'Accept': 'application/sdp'
+      },
+      body: sdpOffer
+    });
+
+    if (response.ok) {
+      const answerSdp = await response.text();
+      console.log(`✅ WHIP proxy success for ${streamName}, answer length:`, answerSdp.length);
+      
+      res.set({
+        'Content-Type': 'application/sdp',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
+      });
+      res.send(answerSdp);
+    } else {
+      const errorText = await response.text();
+      console.error(`❌ WHIP proxy failed for ${streamName}: ${response.status} - ${errorText}`);
+      res.status(response.status).send(errorText);
+    }
+  } catch (error) {
+    console.error('❌ WHIP proxy error:', error);
+    res.status(503).json({ error: 'MediaMTX WHIP service unavailable', details: error.message });
+  }
+});
+
+// WHEP endpoint proxy (for subscribing to streams)
+app.post('/:streamName/whep', async (req, res) => {
+  try {
+    const { streamName } = req.params;
+    const sdpOffer = req.body;
+    
+    console.log(`📥 WHEP proxy request for stream: ${streamName}`);
+    
+    const response = await fetch(`http://localhost:8889/${streamName}/whep`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/sdp',
+        'Accept': 'application/sdp'
+      },
+      body: sdpOffer
+    });
+
+    if (response.ok) {
+      const answerSdp = await response.text();
+      console.log(`✅ WHEP proxy success for ${streamName}`);
+      
+      res.set({
+        'Content-Type': 'application/sdp',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.send(answerSdp);
+    } else {
+      const errorText = await response.text();
+      console.error(`❌ WHEP proxy failed for ${streamName}: ${response.status} - ${errorText}`);
+      res.status(response.status).send(errorText);
+    }
+  } catch (error) {
+    console.error('❌ WHEP proxy error:', error);
+    res.status(503).json({ error: 'MediaMTX WHEP service unavailable' });
+  }
+});
+
+// HLS viewer proxy
+app.get('/hls/:streamName/*', async (req, res) => {
+  try {
+    const { streamName } = req.params;
+    const path = req.path.replace(`/hls/${streamName}`, '');
+    const targetUrl = `http://localhost:8888/${streamName}${path}`;
+    
+    console.log(`📺 HLS proxy request: ${targetUrl}`);
+    
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: {
+        'Accept': req.headers.accept || '*/*'
+      }
+    });
+
+    if (response.ok) {
+      const contentType = response.headers.get('content-type') || 'text/plain';
+      const data = await response.text();
+      
+      res.set({
+        'Content-Type': contentType,
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-cache'
+      });
+      res.send(data);
+    } else {
+      res.status(response.status).send('Stream not available');
+    }
+  } catch (error) {
+    console.error('❌ HLS proxy error:', error);
+    res.status(503).send('HLS service unavailable');
+  }
+});
+
+// MediaMTX API proxy
+app.get('/v3/*', async (req, res) => {
+  try {
+    const apiPath = req.originalUrl;
+    const targetUrl = `http://localhost:9997${apiPath}`;
+    
+    console.log(`🔧 API proxy request: ${targetUrl}`);
+    
+    const response = await fetch(targetUrl);
+    
+    if (response.ok) {
+      const data = await response.json();
+      res.json(data);
+    } else {
+      res.status(response.status).json({ error: 'API request failed' });
+    }
+  } catch (error) {
+    console.error('❌ API proxy error:', error);
+    res.status(503).json({ error: 'MediaMTX API unavailable' });
+  }
+});
+
+// CORS preflight for WHIP/WHEP
+app.options('/:streamName/whip', (req, res) => {
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept',
+    'Access-Control-Max-Age': '86400'
+  });
+  res.sendStatus(200);
+});
+
+app.options('/:streamName/whep', (req, res) => {
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Accept',
+    'Access-Control-Max-Age': '86400'
+  });
+  res.sendStatus(200);
+});
+
+// Socket connection handling (your existing code)
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  // Student join
   socket.on('join-as-student', (data) => {
     const { studentId, roomId, name } = data;
     
@@ -192,7 +347,6 @@ io.on('connection', (socket) => {
     console.log(`👨‍🎓 Student ${studentId} joined room ${roomId}`);
   });
 
-  // Proctor join
   socket.on('join-as-proctor', (data) => {
     const { proctorId, roomId, name } = data;
     
@@ -223,7 +377,6 @@ io.on('connection', (socket) => {
     console.log(`👨‍🏫 Proctor ${proctorId} joined room ${roomId}`);
   });
 
-  // Stream events
   socket.on('stream-published', (data) => {
     const { studentId, streamType, streamName, viewUrl } = data;
     const userInfo = socketToRoom[socket.id];
@@ -252,7 +405,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Disconnect handling
   socket.on('disconnect', () => {
     const userInfo = socketToRoom[socket.id];
     
@@ -286,18 +438,24 @@ io.on('connection', (socket) => {
 // API endpoints
 app.get('/', (req, res) => {
   res.json({
-    status: 'MediaMTX Proctoring Backend - Railway Deployed! 🚀',
+    status: 'MediaMTX Proctoring Backend - Railway with Proxying! 🚀',
     timestamp: new Date(),
     activeStudents: Object.keys(activeStudents).length,
     activeProctors: Object.keys(activeProctors).length,
     environment: process.env.NODE_ENV || 'production',
     mediamtxStatus: mediamtxProcess ? (mediamtxProcess.killed ? 'stopped' : 'running') : 'not started',
-    version: '1.0.2',
+    version: '1.0.3',
     ports: {
       main: PORT,
       webrtc: 8889,
       hls: 8888,
       api: 9997
+    },
+    proxyEndpoints: {
+      whip: '/:streamName/whip',
+      whep: '/:streamName/whep',
+      hls: '/hls/:streamName/*',
+      api: '/v3/*'
     }
   });
 });
@@ -305,23 +463,29 @@ app.get('/', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'OK',
-    server: 'Railway',
+    server: 'Railway with MediaMTX Proxying',
     activeStudents: Object.keys(activeStudents).length,
     activeProctors: Object.keys(activeProctors).length,
     mediamtxRunning: mediamtxProcess && !mediamtxProcess.killed,
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    proxyStatus: 'Active'
   });
 });
 
-// ✅ ADD MediaMTX Health Check
 app.get('/mediamtx/health', async (req, res) => {
   try {
     const response = await fetch(`${MEDIAMTX_HTTP_URL}/v3/config/global/get`);
     if (response.ok) {
       res.json({ 
-        status: 'MediaMTX server is running on Railway', 
+        status: 'MediaMTX server is running on Railway with proxying', 
         url: MEDIAMTX_HTTP_URL,
-        mediamtxProcess: mediamtxProcess ? 'running' : 'stopped'
+        mediamtxProcess: mediamtxProcess ? 'running' : 'stopped',
+        proxyStatus: 'Active',
+        endpoints: {
+          whip: `${req.protocol}://${req.get('host')}/:streamName/whip`,
+          whep: `${req.protocol}://${req.get('host')}/:streamName/whep`,
+          hls: `${req.protocol}://${req.get('host')}/hls/:streamName/`
+        }
       });
     } else {
       res.status(503).json({ 
@@ -347,7 +511,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ✅ ENHANCED Graceful shutdown
+// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('🛑 SIGTERM received - shutting down gracefully...');
   if (mediamtxProcess) {
@@ -373,12 +537,13 @@ process.on('SIGINT', () => {
 
 // Start server
 server.listen(PORT, () => {
-  console.log(`🚀 Backend + MediaMTX server running on Railway port ${PORT}`);
-  console.log(`🎥 MediaMTX WebRTC URL: ${MEDIAMTX_HTTP_URL}`);
+  console.log(`🚀 Backend + MediaMTX server with proxying running on Railway port ${PORT}`);
+  console.log(`🎥 MediaMTX WebRTC URL (internal): ${MEDIAMTX_HTTP_URL}`);
   console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
   console.log(`📊 Health check: /api/health`);
   console.log(`📺 MediaMTX health: /mediamtx/health`);
   console.log(`🔧 Environment: ${process.env.NODE_ENV || 'production'}`);
+  console.log(`🔀 Proxy endpoints active: WHIP, WHEP, HLS, API`);
 });
 
 module.exports = { app, server, io };
