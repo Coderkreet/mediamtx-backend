@@ -1,4 +1,4 @@
-// server.js - Complete Railway Ready Version with Enhanced HLS Support
+// server.js - Complete Railway Ready Version with Alternative Stream Creation
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -147,10 +147,103 @@ let socketToRoom = {};
 let activeStudents = {};
 let activeProctors = {};
 
-// ✅ ENHANCED MediaMTX PROXYING with Better Error Handling
+// ✅ NEW: Helper function to create stream path in MediaMTX
+const createStreamPathIfNeeded = async (streamName, streamType = 'camera') => {
+  try {
+    console.log(`🔧 Creating/verifying stream path: ${streamName}`);
+    
+    // First check if path already exists
+    const existingPathResponse = await fetch(`http://localhost:9997/v3/paths/get/${streamName}`);
+    if (existingPathResponse.ok) {
+      const pathData = await existingPathResponse.json();
+      console.log(`✅ Stream path already exists: ${streamName}`, pathData);
+      return true;
+    }
 
-// WHIP endpoint proxy (for publishing streams)
+    // Create new path
+    const createResponse = await fetch(`http://localhost:9997/v3/paths/add/${streamName}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        source: 'publisher',
+        sourceOnDemand: false,
+        overridePublisher: true,
+        record: false,
+        runOnReady: `echo "Stream ${streamName} ready for HLS"`,
+        runOnReadyRestart: true
+      })
+    });
+
+    if (createResponse.ok) {
+      const result = await createResponse.json();
+      console.log(`✅ Stream path created successfully: ${streamName}`, result);
+      
+      // Initialize HLS endpoint after path creation
+      setTimeout(async () => {
+        try {
+          console.log(`🔄 Initializing HLS endpoint for: ${streamName}`);
+          await fetch(`http://localhost:8888/${streamName}/index.m3u8`);
+        } catch (initError) {
+          console.log(`⚠️ HLS initialization pending for ${streamName}:`, initError.message);
+        }
+      }, 2000);
+      
+      return true;
+    } else {
+      const errorText = await createResponse.text();
+      console.log(`⚠️ Path creation failed: ${createResponse.status} - ${errorText}`);
+      return false;
+    }
+  } catch (error) {
+    console.error(`❌ Stream path creation error for ${streamName}:`, error);
+    return false;
+  }
+};
+
+// ✅ NEW: Force create stream path API endpoint
+app.post('/api/stream/:streamName/create', async (req, res) => {
+  try {
+    const { streamName } = req.params;
+    const { streamType = 'camera' } = req.body;
+    
+    console.log(`🎯 Force creating stream: ${streamName} (type: ${streamType})`);
+    
+    const created = await createStreamPathIfNeeded(streamName, streamType);
+    
+    if (created) {
+      res.json({
+        success: true,
+        streamName,
+        streamType,
+        message: 'Stream path created/verified successfully',
+        viewUrl: `/hls/${streamName}/`,
+        hlsUrl: `/hls/${streamName}/index.m3u8`,
+        statusUrl: `/api/stream/${streamName}/status`,
+        timestamp: new Date()
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        streamName,
+        error: 'Failed to create stream path',
+        message: 'MediaMTX path creation failed'
+      });
+    }
+  } catch (error) {
+    console.error('Stream creation API error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Stream creation failed',
+      details: error.message
+    });
+  }
+});
+
+// ✅ ENHANCED WHIP with quick timeout and fallback stream creation
 app.post('/:streamName/whip', async (req, res) => {
+  const startTime = Date.now();
   try {
     const { streamName } = req.params;
     const sdpOffer = req.body;
@@ -158,15 +251,17 @@ app.post('/:streamName/whip', async (req, res) => {
     console.log(`📤 WHIP proxy request for stream: ${streamName}`);
     console.log('SDP Offer length:', sdpOffer ? sdpOffer.length : 'undefined');
     
-    if (!sdpOffer) {
-      return res.status(400).json({ error: 'No SDP offer provided' });
+    if (!sdpOffer || sdpOffer.trim().length === 0) {
+      return res.status(400).json({ error: 'No SDP offer provided or empty SDP' });
     }
 
-    // Enhanced timeout and error handling
+    // ✅ CRITICAL: Much shorter timeout for Railway WebRTC (10 seconds only)
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000); // 25 second timeout
+    const timeout = setTimeout(() => controller.abort(), 10000); // Only 10 seconds
 
     try {
+      console.log(`🔄 Quick WebRTC attempt for ${streamName} (10s timeout)`);
+      
       const response = await fetch(`http://localhost:8889/${streamName}/whip`, {
         method: 'POST',
         headers: {
@@ -179,10 +274,18 @@ app.post('/:streamName/whip', async (req, res) => {
       });
 
       clearTimeout(timeout);
+      const responseTime = Date.now() - startTime;
+
+      console.log(`📥 MediaMTX WHIP response: ${response.status} (${responseTime}ms)`);
 
       if (response.ok) {
         const answerSdp = await response.text();
-        console.log(`✅ WHIP proxy success for ${streamName}, answer length:`, answerSdp.length);
+        console.log(`✅ WHIP success for ${streamName}, answer length:`, answerSdp.length);
+        
+        // ✅ Verify and ensure stream path exists
+        setTimeout(async () => {
+          await createStreamPathIfNeeded(streamName);
+        }, 2000);
         
         res.set({
           'Content-Type': 'application/sdp',
@@ -191,33 +294,48 @@ app.post('/:streamName/whip', async (req, res) => {
           'Access-Control-Allow-Headers': 'Content-Type'
         });
         res.send(answerSdp);
+        
       } else {
         const errorText = await response.text();
-        console.error(`❌ WHIP proxy failed for ${streamName}: ${response.status} - ${errorText}`);
-        
-        // Still return success for HLS fallback
-        res.status(202).json({ 
-          message: 'Stream received, WebRTC may timeout but HLS will be available',
-          hlsUrl: `/hls/${streamName}/index.m3u8`,
-          viewUrl: `/hls/${streamName}/`
-        });
+        console.error(`❌ WHIP failed: ${response.status} - ${errorText}`);
+        throw new Error(`WebRTC failed: ${response.status} - ${errorText}`);
       }
+
     } catch (fetchError) {
       clearTimeout(timeout);
-      console.error(`❌ WHIP fetch error for ${streamName}:`, fetchError.message);
+      const responseTime = Date.now() - startTime;
       
-      if (fetchError.name === 'AbortError') {
-        console.log(`⏰ WHIP timeout for ${streamName}, but HLS should work`);
-        res.status(202).json({ 
-          message: 'WebRTC timeout, but stream is being processed for HLS',
-          hlsUrl: `/hls/${streamName}/index.m3u8`,
-          viewUrl: `/hls/${streamName}/`
-        });
-      } else {
-        res.status(202).json({ 
-          message: 'WebRTC connection failed, but HLS processing continues',
-          hlsUrl: `/hls/${streamName}/index.m3u8`,
-          error: fetchError.message
+      console.log(`⚠️ WebRTC failed for ${streamName} after ${responseTime}ms: ${fetchError.message}`);
+      console.log(`🔄 Creating fallback stream path for HLS viewing...`);
+      
+      // ✅ CRITICAL: Always create stream path for HLS even if WebRTC failed
+      try {
+        const streamCreated = await createStreamPathIfNeeded(streamName);
+        
+        if (streamCreated) {
+          console.log(`✅ Fallback stream path created for ${streamName}`);
+          
+          res.status(202).json({ 
+            message: 'WebRTC failed but stream path created for HLS viewing',
+            webrtcFailed: true,
+            webrtcError: fetchError.message,
+            hlsUrl: `/hls/${streamName}/index.m3u8`,
+            viewUrl: `/hls/${streamName}/`,
+            statusUrl: `/api/stream/${streamName}/status`,
+            fallbackCreated: true,
+            responseTime: responseTime
+          });
+        } else {
+          throw new Error('Both WebRTC and fallback stream creation failed');
+        }
+        
+      } catch (fallbackError) {
+        console.error(`❌ Fallback stream creation also failed for ${streamName}:`, fallbackError);
+        res.status(503).json({
+          error: 'Both WebRTC and fallback stream creation failed',
+          webrtcError: fetchError.message,
+          fallbackError: fallbackError.message,
+          streamName: streamName
         });
       }
     }
@@ -227,12 +345,12 @@ app.post('/:streamName/whip', async (req, res) => {
     res.status(503).json({ 
       error: 'MediaMTX WHIP service unavailable', 
       details: error.message,
-      fallback: 'HLS streaming may still work'
+      streamName: req.params.streamName
     });
   }
 });
 
-// WHEP endpoint proxy (for subscribing to streams)
+// ✅ WHEP endpoint proxy (unchanged but with timeout)
 app.post('/:streamName/whep', async (req, res) => {
   try {
     const { streamName } = req.params;
@@ -240,6 +358,9 @@ app.post('/:streamName/whep', async (req, res) => {
     
     console.log(`📥 WHEP proxy request for stream: ${streamName}`);
     
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
     const response = await fetch(`http://localhost:8889/${streamName}/whep`, {
       method: 'POST',
       headers: {
@@ -247,8 +368,11 @@ app.post('/:streamName/whep', async (req, res) => {
         'Accept': 'application/sdp',
         'User-Agent': 'Railway-MediaMTX-Proxy'
       },
-      body: sdpOffer
+      body: sdpOffer,
+      signal: controller.signal
     });
+
+    clearTimeout(timeout);
 
     if (response.ok) {
       const answerSdp = await response.text();
@@ -270,7 +394,7 @@ app.post('/:streamName/whep', async (req, res) => {
   }
 });
 
-// ✅ ENHANCED HLS PROXY with Proper Routing and Error Handling
+// ✅ ENHANCED HLS PROXY with better error handling
 
 // HLS Master Playlist (index.m3u8)
 app.get('/hls/:streamName/index.m3u8', async (req, res) => {
@@ -281,7 +405,7 @@ app.get('/hls/:streamName/index.m3u8', async (req, res) => {
     console.log(`📺 HLS Master playlist request: ${targetUrl}`);
     
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), 8000);
 
     const response = await fetch(targetUrl, {
       method: 'GET',
@@ -297,7 +421,7 @@ app.get('/hls/:streamName/index.m3u8', async (req, res) => {
     if (response.ok) {
       const playlist = await response.text();
       console.log(`✅ HLS Master playlist success for ${streamName}`);
-      console.log('Playlist preview:', playlist.substring(0, 200) + '...');
+      console.log('Playlist content length:', playlist.length);
       
       res.set({
         'Content-Type': 'application/vnd.apple.mpegurl',
@@ -309,7 +433,24 @@ app.get('/hls/:streamName/index.m3u8', async (req, res) => {
       res.send(playlist);
     } else {
       console.error(`❌ HLS Master playlist failed: ${response.status}`);
-      res.status(response.status).send(`HLS stream ${streamName} not available (status: ${response.status})`);
+      
+      // ✅ Try to create stream path if playlist not found
+      if (response.status === 404) {
+        console.log(`🔄 Attempting to create missing stream path: ${streamName}`);
+        try {
+          await createStreamPathIfNeeded(streamName);
+          res.status(404).json({
+            error: `HLS stream ${streamName} not available yet`,
+            message: 'Stream path created, please try again in a few seconds',
+            retryAfter: 5,
+            statusUrl: `/api/stream/${streamName}/status`
+          });
+        } catch (createError) {
+          res.status(404).send(`HLS stream ${streamName} not available`);
+        }
+      } else {
+        res.status(response.status).send(`HLS stream ${streamName} error: ${response.status}`);
+      }
     }
   } catch (error) {
     console.error('❌ HLS Master playlist error:', error);
@@ -336,7 +477,7 @@ app.get('/hls/:streamName/*.m3u8', async (req, res) => {
         'Accept': 'application/vnd.apple.mpegurl,*/*',
         'User-Agent': 'Railway-HLS-Proxy'
       },
-      timeout: 8000
+      timeout: 6000
     });
 
     if (response.ok) {
@@ -370,7 +511,7 @@ app.get('/hls/:streamName/*.ts', async (req, res) => {
     
     const response = await fetch(targetUrl, {
       method: 'GET',
-      timeout: 15000
+      timeout: 12000
     });
 
     if (response.ok) {
@@ -433,7 +574,7 @@ app.get('/hls/:streamName/*', async (req, res) => {
   }
 });
 
-// ✅ Stream Status API
+// ✅ ENHANCED Stream Status API
 app.get('/api/stream/:streamName/status', async (req, res) => {
   try {
     const { streamName } = req.params;
@@ -441,9 +582,12 @@ app.get('/api/stream/:streamName/status', async (req, res) => {
     console.log(`🔍 Stream status check: ${streamName}`);
     
     // Check MediaMTX paths
-    const pathsResponse = await fetch('http://localhost:9997/v3/paths/list');
+    const pathsResponse = await fetch('http://localhost:9997/v3/paths/list', { timeout: 5000 });
     if (!pathsResponse.ok) {
-      return res.status(503).json({ error: 'MediaMTX API unavailable' });
+      return res.status(503).json({ 
+        error: 'MediaMTX API unavailable',
+        streamName: streamName
+      });
     }
     
     const pathsData = await pathsResponse.json();
@@ -451,33 +595,53 @@ app.get('/api/stream/:streamName/status', async (req, res) => {
     
     if (streamPath) {
       // Check HLS availability
-      const hlsResponse = await fetch(`http://localhost:8888/${streamName}/index.m3u8`);
-      const hlsAvailable = hlsResponse.ok;
-      
-      console.log(`✅ Stream status: ${streamName} - Ready: ${streamPath.ready}, HLS: ${hlsAvailable}`);
-      
-      res.json({
-        streamName,
-        exists: true,
-        ready: streamPath.ready || false,
-        hlsAvailable,
-        hlsUrl: `/hls/${streamName}/index.m3u8`,
-        viewUrl: `/hls/${streamName}/`,
-        pathInfo: {
-          sourceReady: streamPath.sourceReady || false,
-          tracks: streamPath.tracks || 0,
-          bytesReceived: streamPath.bytesReceived || 0
-        },
-        timestamp: new Date()
-      });
+      try {
+        const hlsResponse = await fetch(`http://localhost:8888/${streamName}/index.m3u8`, { 
+          method: 'HEAD',
+          timeout: 3000 
+        });
+        const hlsAvailable = hlsResponse.ok;
+        
+        console.log(`✅ Stream found: ${streamName} - Ready: ${streamPath.ready}, HLS: ${hlsAvailable}`);
+        
+        res.json({
+          exists: true,
+          streamName,
+          ready: streamPath.ready || false,
+          hlsAvailable,
+          hlsUrl: `/hls/${streamName}/index.m3u8`,
+          viewUrl: `/hls/${streamName}/`,
+          pathInfo: {
+            name: streamPath.name,
+            source: streamPath.source,
+            sourceReady: streamPath.sourceReady || false,
+            tracks: streamPath.tracks || 0,
+            bytesReceived: streamPath.bytesReceived || 0,
+            conf: streamPath.conf || {}
+          },
+          timestamp: new Date()
+        });
+      } catch (hlsError) {
+        console.log(`⚠️ HLS check failed for ${streamName}:`, hlsError.message);
+        res.json({
+          exists: true,
+          streamName,
+          ready: streamPath.ready || false,
+          hlsAvailable: false,
+          hlsError: hlsError.message,
+          message: 'Stream exists but HLS not ready',
+          timestamp: new Date()
+        });
+      }
     } else {
       console.log(`❌ Stream not found: ${streamName}`);
       res.json({
-        streamName,
         exists: false,
+        streamName,
         ready: false,
         hlsAvailable: false,
-        message: 'Stream not found or not ready',
+        message: 'Stream not found in MediaMTX paths',
+        createUrl: `/api/stream/${streamName}/create`,
         timestamp: new Date()
       });
     }
@@ -607,7 +771,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('stream-published', (data) => {
-    const { studentId, streamType, streamName, viewUrl } = data;
+    const { studentId, streamType, streamName, viewUrl, hlsUrl, statusUrl } = data;
     const userInfo = socketToRoom[socket.id];
     
     if (userInfo) {
@@ -616,8 +780,9 @@ io.on('connection', (socket) => {
         studentId,
         streamType,
         streamName,
-        viewUrl,
-        hlsUrl: `/hls/${streamName}/index.m3u8`,
+        viewUrl: viewUrl || `/hls/${streamName}/`,
+        hlsUrl: hlsUrl || `/hls/${streamName}/index.m3u8`,
+        statusUrl: statusUrl || `/api/stream/${streamName}/status`,
         timestamp: new Date()
       });
     }
@@ -669,13 +834,13 @@ io.on('connection', (socket) => {
 // API endpoints
 app.get('/', (req, res) => {
   res.json({
-    status: 'MediaMTX Proctoring Backend - Railway Enhanced HLS! 🚀',
+    status: 'MediaMTX Proctoring Backend - Railway with Alternative Stream Creation! 🚀',
     timestamp: new Date(),
     activeStudents: Object.keys(activeStudents).length,
     activeProctors: Object.keys(activeProctors).length,
     environment: process.env.NODE_ENV || 'production',
     mediamtxStatus: mediamtxProcess ? (mediamtxProcess.killed ? 'stopped' : 'running') : 'not started',
-    version: '1.1.0',
+    version: '1.2.0',
     ports: {
       main: PORT,
       webrtc: 8889,
@@ -683,18 +848,20 @@ app.get('/', (req, res) => {
       api: 9997
     },
     proxyEndpoints: {
-      whip: '/:streamName/whip',
+      whip: '/:streamName/whip (10s timeout)',
       whep: '/:streamName/whep',
       hls: '/hls/:streamName/*',
       hlsMaster: '/hls/:streamName/index.m3u8',
       streamStatus: '/api/stream/:streamName/status',
+      streamCreate: '/api/stream/:streamName/create',
       api: '/v3/*'
     },
     features: [
       'Enhanced HLS streaming',
-      'WebRTC fallback support',
-      'Stream status monitoring',
-      'Automatic retry handling',
+      'WebRTC with quick timeout (10s)',
+      'Alternative stream creation',
+      'Stream path auto-creation',
+      'Enhanced error handling',
       'Railway optimized'
     ]
   });
@@ -703,14 +870,14 @@ app.get('/', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'OK',
-    server: 'Railway with Enhanced MediaMTX Proxying',
+    server: 'Railway with Alternative Stream Creation',
     activeStudents: Object.keys(activeStudents).length,
     activeProctors: Object.keys(activeProctors).length,
     mediamtxRunning: mediamtxProcess && !mediamtxProcess.killed,
     uptime: process.uptime(),
-    proxyStatus: 'Enhanced Active',
-    hlsProxy: 'Enhanced with segment routing',
-    version: '1.1.0'
+    proxyStatus: 'Enhanced Active with Fallbacks',
+    hlsProxy: 'Enhanced with auto stream creation',
+    version: '1.2.0'
   });
 });
 
@@ -722,17 +889,18 @@ app.get('/mediamtx/health', async (req, res) => {
     
     if (response.ok) {
       res.json({ 
-        status: 'MediaMTX server running on Railway with enhanced HLS', 
+        status: 'MediaMTX server running with alternative stream creation', 
         url: MEDIAMTX_HTTP_URL,
         mediamtxProcess: mediamtxProcess ? (mediamtxProcess.killed ? 'stopped' : 'running') : 'not started',
-        proxyStatus: 'Enhanced Active',
+        proxyStatus: 'Enhanced Active with Fallbacks',
         endpoints: {
-          whip: `${req.protocol}://${req.get('host')}/:streamName/whip`,
+          whip: `${req.protocol}://${req.get('host')}/:streamName/whip (10s timeout)`,
           whep: `${req.protocol}://${req.get('host')}/:streamName/whep`,
           hls: `${req.protocol}://${req.get('host')}/hls/:streamName/index.m3u8`,
-          streamStatus: `${req.protocol}://${req.get('host')}/api/stream/:streamName/status`
+          streamStatus: `${req.protocol}://${req.get('host')}/api/stream/:streamName/status`,
+          streamCreate: `${req.protocol}://${req.get('host')}/api/stream/:streamName/create`
         },
-        version: '1.1.0'
+        version: '1.2.0'
       });
     } else {
       res.status(503).json({ 
@@ -786,15 +954,17 @@ process.on('SIGINT', () => {
 
 // Start server
 server.listen(PORT, () => {
-  console.log(`🚀 Backend + MediaMTX server with enhanced HLS running on Railway port ${PORT}`);
+  console.log(`🚀 Backend + MediaMTX with alternative stream creation running on Railway port ${PORT}`);
   console.log(`🎥 MediaMTX WebRTC URL (internal): ${MEDIAMTX_HTTP_URL}`);
   console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
   console.log(`📊 Health check: /api/health`);
   console.log(`📺 MediaMTX health: /mediamtx/health`);
   console.log(`🔧 Environment: ${process.env.NODE_ENV || 'production'}`);
-  console.log(`🔀 Enhanced proxy endpoints: WHIP, WHEP, HLS (with segments), API`);
+  console.log(`🔀 Enhanced proxy endpoints: WHIP (10s timeout), WHEP, HLS, API`);
   console.log(`📺 HLS Master playlist: /hls/:streamName/index.m3u8`);
   console.log(`📊 Stream status API: /api/stream/:streamName/status`);
+  console.log(`🎯 Stream creation API: /api/stream/:streamName/create`);
+  console.log(`⚡ Features: Quick WebRTC timeout, Alternative stream creation, Auto-fallback to HLS`);
 });
 
 module.exports = { app, server, io };

@@ -1,4 +1,4 @@
-# mediamtx.yml - HLS-Optimized for Railway
+# mediamtx.yml - Railway Optimized with RTMP Focus
 logLevel: info
 logDestinations: [stdout]
 readTimeout: 10s
@@ -9,47 +9,54 @@ api: yes
 apiAddress: :9997
 apiAllowOrigin: '*'
 
-# ✅ CRITICAL: HLS Configuration for Railway
+# ✅ FOCUS on HLS (Most reliable on Railway)
 hls: yes
 hlsAddress: :8888
 hlsAllowOrigin: '*'
 hlsAlwaysRemux: yes
 hlsVariant: mpegts
-hlsSegmentCount: 7
+hlsSegmentCount: 10
 hlsSegmentDuration: 2s
-hlsPartDuration: 500ms
+hlsPartDuration: 200ms
 hlsSegmentMaxSize: 50M
-hlsDirectory: ''
-hlsMuxerCloseAfter: 60s
 
-# ✅ WebRTC - Simplified for Railway
+# ✅ RTMP (Alternative to WebRTC for Railway)
+rtmp: yes
+rtmpAddress: :1935
+rtmpEncryption: "no"
+
+# ✅ SRT (Better for Railway than WebRTC)
+srt: yes
+srtAddress: :8890
+
+# ✅ Simplified WebRTC (Backup only)
 webrtc: yes
 webrtcAddress: :8889
 webrtcAllowOrigin: '*'
 webrtcLocalUDPAddress: :8189
-webrtcLocalTCPAddress: ''
+webrtcLocalTCPAddress: :8190
 webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: ["0.0.0.0"]
 webrtcICEServers2:
   - url: stun:stun.l.google.com:19302
-webrtcHandshakeTimeout: 10s
+webrtcHandshakeTimeout: 5s  # Shorter timeout
 webrtcTrackGatherTimeout: 2s
 
-# RTSP
+# ✅ RTSP with TCP (Railway friendly)
 rtsp: yes
 rtspAddress: :8554
 rtspTransports: [tcp]
 
-# ✅ CRITICAL: Path settings for HLS conversion
+# ✅ Critical path settings
 pathDefaults:
   source: publisher
   sourceOnDemand: no
-  maxReaders: 0
-  record: no
-  runOnReady: ''
-  runOnNotReady: ''
   overridePublisher: yes
+  runOnInit: 'echo "Path $MTX_PATH initialized"'
+  runOnInitRestart: yes
 
 paths:
   all_others:
     source: publisher
+    runOnReady: 'echo "Stream $MTX_PATH ready for HLS"'
+    runOnReadyRestart: yes
